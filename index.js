@@ -4,7 +4,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // fixed list for tgj, bob
-let targetUserId = process.env.TARGET_USER_IDS ? JSON.parse(process.env.TARGET_USER_IDS) : [];
+let targetUserId = process.env.TARGET_USER_IDS ? 
+  process.env.TARGET_USER_IDS.replace(/[\[\]]/g, '').split(',').map(id => id.trim()) : [];
 
 let userSchedules = {};
 
@@ -33,7 +34,10 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName('timeleft')
-    .setDescription('See how many minutes until your next auto-disconnect')
+    .setDescription('See how many minutes until your next auto-disconnect'),
+  new SlashCommandBuilder()
+    .setName('mandatory')
+    .setDescription('See who are mandatory to leave the voice channel')
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
@@ -46,20 +50,41 @@ async function registerCommands() {
   console.log('✅ Commands registered');
 }
 
+async function fetchTargetUserIds(action) {
+  const guild = await client.guilds.fetch(process.env.GUILD_ID);
+    const channel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased());
+    if (channel) {
+      let user = '';
+      for (const id of targetUserId) {
+        try {
+          const member = await guild.members.fetch(id).catch(() => null);
+          if (member) {
+            user += `<@${id}> `;
+          } else {
+            console.log(`⚠️ Could not find member with ID: ${id}`);
+          }
+        } catch (error) {
+          console.error(`❌ Error fetching member ${id}:`, error);
+        }
+      }
+      if (action === 'mandatory') {
+        channel.send(`${user} ⏳ will auto-disconnect at 1 AM Indonesian time.`);
+      }
+      if (action === 'left') {
+        channel.send(`${user} ⏳ 15 minutes left until auto-disconnect at 1 AM Indonesian time.`);
+      } 
+    }
+}
+
 client.once('ready', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   registerCommands();
 
   // Indonesian time: 1 AM = UTC 6 PM (18:00)
   cron.schedule('45 17 * * *', async () => {
-    const guild = await client.guilds.fetch(process.env.GUILD_ID);
-    const channel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased());
-    if (channel) {
-      targetUserId.forEach(id => {
-        channel.send(`<@${id}> ⏳ 15 minutes left until auto-disconnect at 1 AM Indonesian time.`);
-      });
-    }
+    fetchTargetUserIds("left");
   });
+
   cron.schedule('0 18 * * *', async () => {
     const guild = await client.guilds.fetch(process.env.GUILD_ID);
     for (const id of targetUserId) {
@@ -126,28 +151,23 @@ client.on('interactionCreate', async interaction => {
       return await interaction.reply('❌ Invalid time. Hours: 0-23, Minutes: 0-59');
     }
     
-    // Get current UTC time
     const utcNow = new Date();
     const utcHour = utcNow.getUTCHours();
     const utcMinute = utcNow.getUTCMinutes();
     
-    // Calculate timezone offset (user local time - UTC time)
     const userTotalMinutes = (currentHour * 60) + currentMinute;
     const utcTotalMinutes = (utcHour * 60) + utcMinute;
     let timezoneOffset = userTotalMinutes - utcTotalMinutes;
     
-    // Handle day boundary crossings
     if (timezoneOffset > 720) timezoneOffset -= 1440; // More than 12 hours ahead
     if (timezoneOffset < -720) timezoneOffset += 1440; // More than 12 hours behind
     
-    // Convert target time to UTC
     const targetTotalMinutes = (targetHour * 60) + targetMinute;
     const utcTargetMinutes = targetTotalMinutes - timezoneOffset;
     
     const utcTargetHour = Math.floor(utcTargetMinutes / 60) % 24;
     const utcTargetMin = utcTargetMinutes % 60;
     
-    // Store in UTC time for consistent scheduling
     userSchedules[interaction.user.id] = { 
       utcHour: utcTargetHour < 0 ? utcTargetHour + 24 : utcTargetHour,
       utcMinute: utcTargetMin < 0 ? utcTargetMin + 60 : utcTargetMin,
@@ -168,11 +188,9 @@ client.on('interactionCreate', async interaction => {
     const utcHour = utcNow.getUTCHours();
     const utcMinute = utcNow.getUTCMinutes();
     
-    // Calculate time until next disconnect (in UTC)
     let utcTarget = new Date();
     utcTarget.setUTCHours(schedule.utcHour, schedule.utcMinute, 0, 0);
     
-    // If target time has passed today, set for tomorrow
     const utcTargetMinutes = (schedule.utcHour * 60) + schedule.utcMinute;
     const utcCurrentMinutes = (utcHour * 60) + utcMinute;
     
@@ -184,6 +202,10 @@ client.on('interactionCreate', async interaction => {
     const diffMinutes = Math.ceil(diffMs / 60000);
     
     await interaction.reply(`🕒 ${diffMinutes} minutes left until your auto-disconnect at ${schedule.userTargetTime} (your local time)`);
+  }
+
+  if (interaction.commandName === 'mandatory') {
+    fetchTargetUserIds("mandatory");
   }
 });
 
